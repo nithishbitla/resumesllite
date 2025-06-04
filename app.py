@@ -23,7 +23,7 @@ app.secret_key = os.getenv("FLASK_SECRET_KEY", "supersecretkey")
 cred = credentials.Certificate("firebase_config.json")
 firebase_admin.initialize_app(cred)
 
-DATABASE = os.getenv("SQLITE_DB_PATH", "resumes.db")
+DATABASE = os.getenv("SQLITE_DB_PATH", "/data/resumes.db")
 HOST_EMAIL = os.getenv("HOST_EMAIL", "host@example.com")
 HOST_PASSWORD = os.getenv("HOST_PASSWORD", "hostpass123")
 
