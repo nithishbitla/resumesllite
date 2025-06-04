@@ -3,3 +3,7 @@ firebase-admin
 python-dotenv
 Werkzeug
 gunicorn
+sentence-transformers
+scikit-learn
+torch
+numpy
