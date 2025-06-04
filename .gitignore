@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.env
+firebase_config.json
+uploads/
+resumes.db
+instance/
+*.sqlite3

@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Uploaded Resumes</title>
+</head>
+<body>
+  <h1>Uploaded Resumes</h1>
+  <table border="1" cellpadding="5" cellspacing="0">
+    <thead>
+      <tr>
+        <th>ID</th>
+        <th>User UID</th>
+        <th>Filename</th>
+        <th>Filepath</th>
+        <th>Uploaded At</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for resume in resumes %}
+      <tr>
+        <td>{{ resume['id'] }}</td>
+        <td>{{ resume['user_uid'] }}</td>
+        <td>{{ resume['filename'] }}</td>
+        <td>{{ resume['filepath'] }}</td>
+        <td>{{ resume['uploaded_at'] }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <a href="{{ url_for('index') }}">Go back</a>
+</body>
+</html>

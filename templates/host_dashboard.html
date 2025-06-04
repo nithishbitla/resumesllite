@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Host Dashboard - Resume Ranking</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px; }
+    h1 { margin-bottom: 10px; }
+    textarea { width: 100%; height: 100px; margin-bottom: 10px; }
+    button { padding: 10px 15px; background-color: #0066cc; color: white; border: none; border-radius: 4px; margin-right: 10px; }
+    button:hover { background-color: #005bb5; cursor: pointer; }
+    table { border-collapse: collapse; width: 100%; margin-top: 20px; }
+    th, td { padding: 10px; border: 1px solid #ddd; text-align: left; }
+    th { background-color: #f4f4f4; }
+    a { color: #0066cc; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    p.logged-in { font-style: italic; margin-bottom: 15px; }
+    .btn-group { margin-top: 10px; }
+  </style>
+</head>
+<body>
+  <h1>Host Dashboard</h1>
+  <p class="logged-in">Logged in as: {{ session['host'] }}</p>
+
+  <!-- Resume Ranking Form -->
+  <form method="POST" action="{{ url_for('host_dashboard') }}">
+    <label for="job_description">Enter Job Description to Rank Resumes:</label><br>
+    <textarea id="job_description" name="job_description" required>{{ job_description or '' }}</textarea><br>
+    <div class="btn-group">
+      <button type="submit">Rank Resumes</button>
+    </div>
+  </form>
+
+  <!-- CSV Download Form -->
+  <form method="POST" action="{{ url_for('download_ranked_resumes_csv') }}">
+    <input type="hidden" name="job_description" value="{{ job_description or '' }}">
+    <button type="submit">Download Ranked Resumes CSV</button>
+  </form>
+
+  {% if resumes %}
+    <h2>{% if job_description %}Ranked Resumes{% else %}Uploaded Resumes{% endif %}</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Rank</th>
+          <th>Name</th>
+          <th>Filename</th>
+          <th>Uploaded At</th>
+          {% if job_description %}
+            <th>Similarity Score</th>
+          {% endif %}
+          <th>Download</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for resume, score in resumes %}
+          <tr>
+            <td>{{ loop.index }}</td>
+            <td>{{ resume['user_name'] or 'N/A' }}</td>
+            <td>{{ resume['filename'] }}</td>
+            <td>{{ resume['uploaded_at'] }}</td>
+            {% if job_description %}
+              <td>{{ '%.4f'|format(score) }}</td>
+            {% endif %}
+            <td><a href="{{ url_for('uploaded_file', filename=resume['filename']) }}" target="_blank" rel="noopener noreferrer">Download</a></td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p>No resumes found.</p>
+  {% endif %}
+
+  <p><a href="{{ url_for('host_logout') }}">Logout</a></p>
+</body>
+</html>

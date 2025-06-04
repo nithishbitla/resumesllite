@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Login</title>
+  <!-- Firebase App (the core Firebase SDK) -->
+  <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-app-compat.js"></script>
+  <!-- Firebase Auth SDK -->
+  <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-auth-compat.js"></script>
+</head>
+<body>
+  <h1>Login</h1>
+
+  <button id="googleSignInBtn">Sign in with Google</button>
+
+  <script>
+    // Your Firebase Web App config here
+    const firebaseConfig = {
+      apiKey: "AIzaSyA9uzRTIwialqFBkPOUw57szGqokSRCGjg",
+      authDomain: "sqllite-74c98.firebaseapp.com",
+      projectId: "sqllite-74c98",
+      storageBucket: "sqllite-74c98.firebasestorage.app",
+      messagingSenderId: "856666995806",
+      appId: "1:856666995806:web:3df237ecc2946e630348cf",
+      measurementId: "G-HG5R6TN2Y1"
+    };
+
+    // Initialize Firebase
+    firebase.initializeApp(firebaseConfig);
+    const auth = firebase.auth();
+
+    document.getElementById('googleSignInBtn').addEventListener('click', () => {
+      const provider = new firebase.auth.GoogleAuthProvider();
+      auth.signInWithPopup(provider)
+        .then((result) => {
+          // Signed in
+          const user = result.user;
+          // Get ID token
+          return user.getIdToken().then(idToken => {
+            // Save token to localStorage or send it to your backend as needed
+            localStorage.setItem('firebaseIdToken', idToken);
+
+            // Redirect based on user choice, here just redirect to /upload
+            window.location.href = '/upload';
+          });
+        })
+        .catch((error) => {
+          console.error('Google Sign-In Error:', error);
+          alert('Failed to sign in. Please try again.');
+        });
+    });
+  </script>
+</body>
+</html>

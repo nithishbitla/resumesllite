@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html>
+<head><title>Dashboard</title></head>
+<body>
+  <h1>Dashboard</h1>
+  <form method="POST" action="/rank">
+    <textarea name="job_description" placeholder="Paste job description here..."></textarea>
+    <button type="submit">Rank Resumes</button>
+  </form>
+  <br>
+  <a href="/download">Download CSV</a>
+  <ul>
+    {% for r in resumes %}
+      <li>{{ r.name }} - {{ r.email }}{% if r.score %} (Score: {{ r.score }}){% endif %}</li>
+    {% endfor %}
+  </ul>
+</body>
+</html>

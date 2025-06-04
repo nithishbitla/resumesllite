@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Upload Resume</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+  <!-- Firebase SDK -->
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/9.23.0/firebase-app.js";
+    import { getAuth, signOut } from "https://www.gstatic.com/firebasejs/9.23.0/firebase-auth.js";
+
+    const firebaseConfig = {
+      apiKey: "AIzaSyA9uzRTIwialqFBkPOUw57szGqokSRCGjg",
+      authDomain: "sqllite-74c98.firebaseapp.com",
+      projectId: "sqllite-74c98",
+      storageBucket: "sqllite-74c98.appspot.com",
+      messagingSenderId: "856666995806",
+      appId: "1:856666995806:web:3df237ecc2946e630348cf",
+      measurementId: "G-HG5R6TN2Y1"
+    };
+
+    const app = initializeApp(firebaseConfig);
+    const auth = getAuth(app);
+
+    window.logout = async function () {
+      try {
+        await signOut(auth);
+        // Redirect to Flask logout route to clear server-side session
+        window.location.href = '/logout';
+      } catch (error) {
+        alert("Error signing out: " + error.message);
+      }
+    };
+  </script>
+
+</head>
+<body>
+  <h1>Upload Resume</h1>
+
+  <button onclick="logout()">Logout</button>
+
+  <form id="uploadForm" method="POST" action="/upload_resume" enctype="multipart/form-data">
+    <input type="file" name="resume" required />
+    <input type="hidden" id="idToken" name="idToken" />
+    <button type="submit">Upload</button>
+  </form>
+
+  <script type="module">
+    import { getAuth } from "https://www.gstatic.com/firebasejs/9.23.0/firebase-auth.js";
+
+    const auth = getAuth();
+
+    // When user submits, add Firebase token to form
+    document.getElementById('uploadForm').addEventListener('submit', async function(event) {
+      event.preventDefault();
+      const user = auth.currentUser;
+      if (!user) {
+        alert("User not logged in");
+        return;
+      }
+      const token = await user.getIdToken();
+      document.getElementById('idToken').value = token;
+      this.submit();
+    });
+  </script>
+</body>
+</html>
