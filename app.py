@@ -21,15 +21,29 @@ app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "supersecretkey")
 app.config['UPLOAD_FOLDER'] = 'uploads'
 
-# Firebase credentials using Render secret file path
-FIREBASE_CREDENTIAL_PATH = os.getenv("FIREBASE_CREDENTIAL_PATH", "/var/render/secrets/firebase_config.json")
-if not os.path.exists(FIREBASE_CREDENTIAL_PATH):
+# Determine Firebase credential path for Render and local
+FIREBASE_CREDENTIAL_PATH = os.getenv("FIREBASE_CREDENTIAL_PATH")
+RENDER_SECRET_PATH = "/var/render/secrets/firebase_config.json"
+LOCAL_FALLBACK_PATH = "firebase_config.json"
+
+# Try environment variable first
+if FIREBASE_CREDENTIAL_PATH and os.path.exists(FIREBASE_CREDENTIAL_PATH):
+    cred_path = FIREBASE_CREDENTIAL_PATH
+# Then try Render secret path
+elif os.path.exists(RENDER_SECRET_PATH):
+    cred_path = RENDER_SECRET_PATH
+# Then fallback to local file in project folder
+elif os.path.exists(LOCAL_FALLBACK_PATH):
+    cred_path = LOCAL_FALLBACK_PATH
+else:
     raise FileNotFoundError(
-        f"Firebase config file not found at '{FIREBASE_CREDENTIAL_PATH}'. "
-        "Make sure it's uploaded to Render as a Secret File with the name 'firebase_config.json'."
+        "Firebase config file not found. Make sure one of the following exists:\n"
+        f"1) Environment variable FIREBASE_CREDENTIAL_PATH pointing to a valid file\n"
+        f"2) Render secret file mounted at {RENDER_SECRET_PATH}\n"
+        f"3) Local file named '{LOCAL_FALLBACK_PATH}' in project root"
     )
 
-cred = credentials.Certificate(FIREBASE_CREDENTIAL_PATH)
+cred = credentials.Certificate(cred_path)
 firebase_admin.initialize_app(cred)
 
 # Constants
