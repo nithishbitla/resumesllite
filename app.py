@@ -2,7 +2,6 @@ import os
 import sqlite3
 import time
 import csv
-import json
 from io import StringIO
 from flask import (
     Flask, request, render_template, redirect, url_for, jsonify, flash,
@@ -13,19 +12,24 @@ import firebase_admin
 from firebase_admin import credentials, auth
 from dotenv import load_dotenv
 from sentence_transformers import SentenceTransformer, util
+from contextlib import closing
 
-# Load environment variables
+# Load environment variables from .env
 load_dotenv()
 
 app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "supersecretkey")
 app.config['UPLOAD_FOLDER'] = 'uploads'
 
-# Firebase Admin Initialization from ENV
-firebase_json = os.environ.get("FIREBASE_CONFIG_JSON")
-if not firebase_json:
-    raise ValueError("FIREBASE_CONFIG_JSON is missing in environment variables")
-cred = credentials.Certificate(json.loads(firebase_json))
+# Firebase credentials
+FIREBASE_CREDENTIAL_PATH = os.getenv("FIREBASE_CREDENTIAL_PATH", "firebase_config.json")
+if not os.path.exists(FIREBASE_CREDENTIAL_PATH):
+    raise FileNotFoundError(
+        f"Firebase config file not found at '{FIREBASE_CREDENTIAL_PATH}'. "
+        "Please place your Firebase service account JSON file there or update FIREBASE_CREDENTIAL_PATH in your .env"
+    )
+
+cred = credentials.Certificate(FIREBASE_CREDENTIAL_PATH)
 firebase_admin.initialize_app(cred)
 
 # Constants
@@ -33,7 +37,12 @@ DATABASE = os.getenv("SQLITE_DB_PATH", "resumes.db")
 HOST_EMAIL = os.getenv("HOST_EMAIL", "host@example.com")
 HOST_PASSWORD = os.getenv("HOST_PASSWORD", "hostpass123")
 
-# Load NLP model
+# Ensure DB directory exists
+db_dir = os.path.dirname(DATABASE)
+if db_dir and not os.path.exists(db_dir):
+    os.makedirs(db_dir, exist_ok=True)
+
+# Load NLP model once
 model = SentenceTransformer('all-MiniLM-L6-v2')
 
 def get_db_connection():
@@ -98,13 +107,12 @@ def upload_resume():
     save_path = os.path.join(app.config['UPLOAD_FOLDER'], unique_filename)
     file.save(save_path)
 
-    conn = get_db_connection()
-    conn.execute(
-        "INSERT INTO resumes (user_uid, user_name, filename, filepath) VALUES (?, ?, ?, ?)",
-        (uid, name, unique_filename, save_path)
-    )
-    conn.commit()
-    conn.close()
+    with closing(get_db_connection()) as conn:
+        conn.execute(
+            "INSERT INTO resumes (user_uid, user_name, filename, filepath) VALUES (?, ?, ?, ?)",
+            (uid, name, unique_filename, save_path)
+        )
+        conn.commit()
 
     return jsonify({"success": True, "message": "Resume uploaded successfully."})
 
@@ -136,9 +144,8 @@ def host_dashboard():
     job_description = ''
     ranked_resumes = None
 
-    conn = get_db_connection()
-    resumes = conn.execute('SELECT * FROM resumes ORDER BY uploaded_at DESC').fetchall()
-    conn.close()
+    with closing(get_db_connection()) as conn:
+        resumes = conn.execute('SELECT * FROM resumes ORDER BY uploaded_at DESC').fetchall()
 
     if request.method == 'POST':
         job_description = request.form.get('job_description', '').strip()
@@ -172,9 +179,8 @@ def download_ranked_resumes_csv():
 
     job_description = request.form.get('job_description', '').strip()
 
-    conn = get_db_connection()
-    resumes = conn.execute('SELECT * FROM resumes ORDER BY uploaded_at DESC').fetchall()
-    conn.close()
+    with closing(get_db_connection()) as conn:
+        resumes = conn.execute('SELECT * FROM resumes ORDER BY uploaded_at DESC').fetchall()
 
     if not job_description or not resumes:
         flash("Please enter a job description and ensure resumes exist.")
@@ -238,7 +244,11 @@ def uploaded_file(filename):
 if __name__ == '__main__':
     os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
-    with get_db_connection() as conn:
+    # Create DB directory if missing (just in case)
+    if db_dir and not os.path.exists(db_dir):
+        os.makedirs(db_dir, exist_ok=True)
+
+    with closing(get_db_connection()) as conn:
         conn.execute('''
             CREATE TABLE IF NOT EXISTS resumes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
