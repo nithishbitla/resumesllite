@@ -21,12 +21,12 @@ app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "supersecretkey")
 app.config['UPLOAD_FOLDER'] = 'uploads'
 
-# Firebase credentials
-FIREBASE_CREDENTIAL_PATH = os.getenv("FIREBASE_CREDENTIAL_PATH", "firebase_config.json")
+# Firebase credentials using Render secret file path
+FIREBASE_CREDENTIAL_PATH = os.getenv("FIREBASE_CREDENTIAL_PATH", "/var/render/secrets/firebase_config.json")
 if not os.path.exists(FIREBASE_CREDENTIAL_PATH):
     raise FileNotFoundError(
         f"Firebase config file not found at '{FIREBASE_CREDENTIAL_PATH}'. "
-        "Please place your Firebase service account JSON file there or update FIREBASE_CREDENTIAL_PATH in your .env"
+        "Make sure it's uploaded to Render as a Secret File with the name 'firebase_config.json'."
     )
 
 cred = credentials.Certificate(FIREBASE_CREDENTIAL_PATH)
@@ -241,10 +241,13 @@ def uploaded_file(filename):
         return "Unauthorized", 401
     return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
 
+@app.route('/health')
+def health_check():
+    return "OK", 200
+
+# App initialization
 if __name__ == '__main__':
     os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-
-    # Create DB directory if missing (just in case)
     if db_dir and not os.path.exists(db_dir):
         os.makedirs(db_dir, exist_ok=True)
 
@@ -261,4 +264,4 @@ if __name__ == '__main__':
         ''')
         conn.commit()
 
-    app.run(debug=True)
+    app.run(host='0.0.0.0', port=5000)
