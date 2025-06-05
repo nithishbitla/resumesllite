@@ -2,6 +2,7 @@ import os
 import sqlite3
 import time
 import csv
+import json
 from io import StringIO
 from flask import (
     Flask, request, render_template, redirect, url_for, jsonify, flash,
@@ -13,20 +14,26 @@ from firebase_admin import credentials, auth
 from dotenv import load_dotenv
 from sentence_transformers import SentenceTransformer, util
 
+# Load environment variables
 load_dotenv()
 
 app = Flask(__name__)
-app.config['UPLOAD_FOLDER'] = 'uploads'
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "supersecretkey")
+app.config['UPLOAD_FOLDER'] = 'uploads'
 
-# Firebase Admin Initialization
-cred = credentials.Certificate("firebase_config.json")
+# Firebase Admin Initialization from ENV
+firebase_json = os.environ.get("FIREBASE_CONFIG_JSON")
+if not firebase_json:
+    raise ValueError("FIREBASE_CONFIG_JSON is missing in environment variables")
+cred = credentials.Certificate(json.loads(firebase_json))
 firebase_admin.initialize_app(cred)
 
-DATABASE = os.getenv("SQLITE_DB_PATH", "/data/resumes.db")
+# Constants
+DATABASE = os.getenv("SQLITE_DB_PATH", "resumes.db")
 HOST_EMAIL = os.getenv("HOST_EMAIL", "host@example.com")
 HOST_PASSWORD = os.getenv("HOST_PASSWORD", "hostpass123")
 
+# Load NLP model
 model = SentenceTransformer('all-MiniLM-L6-v2')
 
 def get_db_connection():
@@ -76,7 +83,7 @@ def upload_resume():
         return jsonify({"error": "Invalid or missing token"}), 401
 
     uid = user['uid']
-    name = user.get('name', 'Unknown')
+    name = user.get('name', user.get('email', 'Unknown'))
 
     if 'resume' not in request.files:
         return jsonify({"error": "No file uploaded"}), 400
@@ -87,8 +94,8 @@ def upload_resume():
 
     filename = secure_filename(file.filename)
     unique_filename = f"{uid}_{int(time.time())}_{filename}"
-    save_path = os.path.join(app.config['UPLOAD_FOLDER'], unique_filename)
     os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+    save_path = os.path.join(app.config['UPLOAD_FOLDER'], unique_filename)
     file.save(save_path)
 
     conn = get_db_connection()
@@ -144,14 +151,14 @@ def host_dashboard():
                     with open(r['filepath'], 'r', encoding='utf-8', errors='ignore') as f:
                         resume_texts.append(f.read())
                 except Exception as e:
-                    app.logger.error(f"Failed to read resume file {r['filepath']}: {e}")
+                    app.logger.error(f"Failed to read resume {r['filepath']}: {e}")
                     resume_texts.append('')
 
             resume_embs = model.encode(resume_texts, convert_to_tensor=True)
             cosine_scores = util.cos_sim(job_emb, resume_embs)[0].tolist()
             ranked_resumes = sorted(zip(resumes, cosine_scores), key=lambda x: x[1], reverse=True)
         else:
-            flash("Please enter a job description and ensure there are uploaded resumes.")
+            flash("Please enter a job description and ensure resumes exist.")
     else:
         ranked_resumes = [(r, 0) for r in resumes]
 
@@ -170,7 +177,7 @@ def download_ranked_resumes_csv():
     conn.close()
 
     if not job_description or not resumes:
-        flash("Please enter a job description and ensure there are uploaded resumes.")
+        flash("Please enter a job description and ensure resumes exist.")
         return redirect(url_for('host_dashboard'))
 
     job_emb = model.encode(job_description, convert_to_tensor=True)
@@ -181,7 +188,7 @@ def download_ranked_resumes_csv():
             with open(r['filepath'], 'r', encoding='utf-8', errors='ignore') as f:
                 resume_texts.append(f.read())
         except Exception as e:
-            app.logger.error(f"Failed to read resume file {r['filepath']}: {e}")
+            app.logger.error(f"Failed to read resume {r['filepath']}: {e}")
             resume_texts.append('')
 
     resume_embs = model.encode(resume_texts, convert_to_tensor=True)
@@ -229,6 +236,8 @@ def uploaded_file(filename):
     return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
 
 if __name__ == '__main__':
+    os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+
     with get_db_connection() as conn:
         conn.execute('''
             CREATE TABLE IF NOT EXISTS resumes (
