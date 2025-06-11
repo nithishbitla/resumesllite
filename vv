@@ -1,0 +1,47 @@
+import sqlite3
+from contextlib import closing
+
+DATABASE = "resumes.db"
+
+def get_db_connection():
+    conn = sqlite3.connect(DATABASE)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def save_resume_metadata(user_uid, user_name, filename, filepath):
+    with closing(get_db_connection()) as conn:
+        conn.execute(
+            "INSERT INTO resumes (user_uid, user_name, filename, filepath) VALUES (?, ?, ?, ?)",
+            (user_uid, user_name, filename, filepath)
+        )
+        conn.commit()
+
+def fetch_all_resumes():
+    with closing(get_db_connection()) as conn:
+        resumes = conn.execute("SELECT * FROM resumes ORDER BY uploaded_at DESC").fetchall()
+    return resumes
+
+
+
+function signOutUser() {
+  firebase.auth().signOut()
+    .then(() => {
+      console.log("User signed out successfully.");
+      window.location.href = "/";  // Redirect to login page after logout
+    })
+    .catch((error) => {
+      console.error("Sign out error:", error);
+      alert("Error signing out. Please try again.");
+    });
+}
+
+// Check if user is authenticated on page load
+firebase.auth().onAuthStateChanged((user) => {
+  if (!user) {
+    // If no user is signed in, redirect to login page
+    window.location.href = "/";
+  }
+});
+
+// Example usage: attach signOutUser to logout button
+document.getElementById('logoutButton').addEventListener('click', signOutUser);

@@ -13,6 +13,7 @@ from firebase_admin import credentials, auth
 from dotenv import load_dotenv
 from sentence_transformers import SentenceTransformer, util
 from contextlib import closing
+import tempfile
 
 # Load environment variables from .env
 load_dotenv()
@@ -26,13 +27,10 @@ FIREBASE_CREDENTIAL_PATH = os.getenv("FIREBASE_CREDENTIAL_PATH")
 RENDER_SECRET_PATH = "/var/render/secrets/firebase_config.json"
 LOCAL_FALLBACK_PATH = "firebase_config.json"
 
-# Try environment variable first
 if FIREBASE_CREDENTIAL_PATH and os.path.exists(FIREBASE_CREDENTIAL_PATH):
     cred_path = FIREBASE_CREDENTIAL_PATH
-# Then try Render secret path
 elif os.path.exists(RENDER_SECRET_PATH):
     cred_path = RENDER_SECRET_PATH
-# Then fallback to local file in project folder
 elif os.path.exists(LOCAL_FALLBACK_PATH):
     cred_path = LOCAL_FALLBACK_PATH
 else:
@@ -47,7 +45,7 @@ cred = credentials.Certificate(cred_path)
 firebase_admin.initialize_app(cred)
 
 # Constants
-DATABASE = os.getenv("SQLITE_DB_PATH", "resumes.db")
+DATABASE = os.getenv("SQLITE_DB_PATH") or os.path.join(tempfile.gettempdir(), "resumes.db")
 HOST_EMAIL = os.getenv("HOST_EMAIL", "host@example.com")
 HOST_PASSWORD = os.getenv("HOST_PASSWORD", "hostpass123")
 
@@ -278,4 +276,5 @@ if __name__ == '__main__':
         ''')
         conn.commit()
 
-    app.run(host='0.0.0.0', port=5000)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port)
