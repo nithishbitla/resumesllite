@@ -22,7 +22,7 @@ app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "supersecretkey")
 app.config['UPLOAD_FOLDER'] = 'uploads'
 
-# Determine Firebase credential path for Render and local
+# Determine Firebase credential path
 FIREBASE_CREDENTIAL_PATH = os.getenv("FIREBASE_CREDENTIAL_PATH")
 RENDER_SECRET_PATH = "/var/render/secrets/firebase_config.json"
 LOCAL_FALLBACK_PATH = "firebase_config.json"
@@ -36,9 +36,9 @@ elif os.path.exists(LOCAL_FALLBACK_PATH):
 else:
     raise FileNotFoundError(
         "Firebase config file not found. Make sure one of the following exists:\n"
-        f"1) Environment variable FIREBASE_CREDENTIAL_PATH pointing to a valid file\n"
-        f"2) Render secret file mounted at {RENDER_SECRET_PATH}\n"
-        f"3) Local file named '{LOCAL_FALLBACK_PATH}' in project root"
+        f"1) Environment variable FIREBASE_CREDENTIAL_PATH\n"
+        f"2) Render secret at {RENDER_SECRET_PATH}\n"
+        f"3) Local fallback at {LOCAL_FALLBACK_PATH}"
     )
 
 cred = credentials.Certificate(cred_path)
@@ -49,12 +49,12 @@ DATABASE = os.getenv("SQLITE_DB_PATH") or os.path.join(tempfile.gettempdir(), "r
 HOST_EMAIL = os.getenv("HOST_EMAIL", "host@example.com")
 HOST_PASSWORD = os.getenv("HOST_PASSWORD", "hostpass123")
 
-# Ensure DB directory exists
+# Ensure DB directory exists (skip if using system temp path)
 db_dir = os.path.dirname(DATABASE)
-if db_dir and not os.path.exists(db_dir):
+if db_dir and db_dir != tempfile.gettempdir() and not os.path.exists(db_dir):
     os.makedirs(db_dir, exist_ok=True)
 
-# Load NLP model once
+# Load NLP model
 model = SentenceTransformer('all-MiniLM-L6-v2')
 
 def get_db_connection():
@@ -163,8 +163,8 @@ def host_dashboard():
         job_description = request.form.get('job_description', '').strip()
         if job_description and resumes:
             job_emb = model.encode(job_description, convert_to_tensor=True)
-
             resume_texts = []
+
             for r in resumes:
                 try:
                     with open(r['filepath'], 'r', encoding='utf-8', errors='ignore') as f:
@@ -257,12 +257,9 @@ def uploaded_file(filename):
 def health_check():
     return "OK", 200
 
-# App initialization
+# Run the app
 if __name__ == '__main__':
     os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-    if db_dir and not os.path.exists(db_dir):
-        os.makedirs(db_dir, exist_ok=True)
-
     with closing(get_db_connection()) as conn:
         conn.execute('''
             CREATE TABLE IF NOT EXISTS resumes (
