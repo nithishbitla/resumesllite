@@ -3,45 +3,42 @@ import sqlite3
 import time
 import csv
 import tempfile
-import gc
-import torch
 from io import StringIO
 from flask import (
-    Flask, request, render_template, redirect, url_for, jsonify, flash,
-    session, send_from_directory, Response
+    Flask, request, render_template, redirect, url_for, jsonify,
+    flash, session, send_from_directory, Response
 )
 from werkzeug.utils import secure_filename
-import firebase_admin
 from firebase_admin import credentials, auth
+import firebase_admin
 from dotenv import load_dotenv
+from contextlib import closing
 
-# Limit Torch CPU threads to reduce memory usage
-torch.set_num_threads(1)
-
-# Load lightweight transformer modules only when needed
-from sentence_transformers import SentenceTransformer, util
-
-# -----------------------------------------------------------------------------
+# ---------------------- ENV & APP SETUP ----------------------
 load_dotenv()
 app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "supersecretkey")
 app.config['UPLOAD_FOLDER'] = os.path.join(tempfile.gettempdir(), "uploads")
 
-# -----------------------------------------------------------------------------
-# Firebase Admin setup
+# ---------------------- FIREBASE SETUP -----------------------
+FIREBASE_CREDENTIAL_PATH = os.getenv("FIREBASE_CREDENTIAL_PATH")
 RENDER_SECRET_PATH = "/var/render/secrets/firebase_config.json"
 LOCAL_FALLBACK_PATH = "firebase_config.json"
-cred_path = os.getenv("FIREBASE_CREDENTIAL_PATH") or (
-    RENDER_SECRET_PATH if os.path.exists(RENDER_SECRET_PATH) else LOCAL_FALLBACK_PATH
-)
-if not os.path.exists(cred_path):
-    raise FileNotFoundError("Firebase config file not found at expected paths.")
+
+if FIREBASE_CREDENTIAL_PATH and os.path.exists(FIREBASE_CREDENTIAL_PATH):
+    cred_path = FIREBASE_CREDENTIAL_PATH
+elif os.path.exists(RENDER_SECRET_PATH):
+    cred_path = RENDER_SECRET_PATH
+elif os.path.exists(LOCAL_FALLBACK_PATH):
+    cred_path = LOCAL_FALLBACK_PATH
+else:
+    raise FileNotFoundError("Firebase config file not found.")
+
 cred = credentials.Certificate(cred_path)
 firebase_admin.initialize_app(cred)
 
-# -----------------------------------------------------------------------------
-# SQLite DB setup
-DATABASE = os.path.join(tempfile.gettempdir(), "resumes.db")
+# ---------------------- DATABASE SETUP -----------------------
+DATABASE = os.getenv("SQLITE_DB_PATH") or os.path.join(tempfile.gettempdir(), "resumes.db")
 HOST_EMAIL = os.getenv("HOST_EMAIL", "host@example.com")
 HOST_PASSWORD = os.getenv("HOST_PASSWORD", "hostpass123")
 
@@ -50,22 +47,12 @@ def get_db_connection():
     conn.row_factory = sqlite3.Row
     return conn
 
-# Ensure upload folder and DB table exist early
-os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-with get_db_connection() as conn:
-    conn.execute('''
-        CREATE TABLE IF NOT EXISTS resumes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_uid TEXT NOT NULL,
-            user_name TEXT,
-            filename TEXT NOT NULL,
-            filepath TEXT NOT NULL,
-            uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    conn.commit()
+# ---------------------- MODEL SETUP --------------------------
+def get_model():
+    from sentence_transformers import SentenceTransformer
+    return SentenceTransformer("paraphrase-MiniLM-L3-v2")  # light-weight
 
-# -----------------------------------------------------------------------------
+# ---------------------- AUTH TOKEN ---------------------------
 def verify_token(token):
     try:
         return auth.verify_id_token(token)
@@ -73,6 +60,7 @@ def verify_token(token):
         app.logger.warning(f"Token verification failed: {e}")
         return None
 
+# ---------------------- ROUTES -------------------------------
 @app.route('/')
 def login():
     if 'user' in session:
@@ -84,7 +72,8 @@ def login():
 @app.route('/verify-token', methods=['POST'])
 def verify_token_route():
     data = request.get_json()
-    user = verify_token(data.get('token'))
+    token = data.get('token')
+    user = verify_token(token)
     if user:
         session['user'] = user['uid']
         session['user_email'] = user.get('email')
@@ -100,15 +89,20 @@ def upload():
 
 @app.route('/upload_resume', methods=['POST'])
 def upload_resume():
-    user = verify_token(request.form.get('idToken'))
+    token = request.form.get('idToken')
+    user = verify_token(token)
     if not user:
         return jsonify({"error": "Invalid or missing token"}), 401
+
     uid = user['uid']
     name = user.get('name', user.get('email', 'Unknown'))
 
-    file = request.files.get('resume')
-    if not file or not file.filename:
+    if 'resume' not in request.files:
         return jsonify({"error": "No file uploaded"}), 400
+
+    file = request.files['resume']
+    if file.filename == '':
+        return jsonify({"error": "Empty filename"}), 400
 
     filename = secure_filename(file.filename)
     unique_filename = f"{uid}_{int(time.time())}_{filename}"
@@ -116,89 +110,154 @@ def upload_resume():
     save_path = os.path.join(app.config['UPLOAD_FOLDER'], unique_filename)
     file.save(save_path)
 
-    with get_db_connection() as conn:
+    with closing(get_db_connection()) as conn:
         conn.execute(
             "INSERT INTO resumes (user_uid, user_name, filename, filepath) VALUES (?, ?, ?, ?)",
             (uid, name, unique_filename, save_path)
         )
         conn.commit()
+
     return jsonify({"success": True, "message": "Resume uploaded successfully."})
 
 @app.route('/host-login', methods=['GET', 'POST'])
 def host_login():
     if request.method == 'POST':
-        if request.form.get('email') == HOST_EMAIL and request.form.get('password') == HOST_PASSWORD:
-            session['host'] = True
+        email = request.form.get('email')
+        password = request.form.get('password')
+
+        if email == HOST_EMAIL and password == HOST_PASSWORD:
+            session['host'] = email
+            flash("Host login successful.")
             return redirect(url_for('host_dashboard'))
-        flash("Invalid host credentials.")
+        else:
+            flash("Invalid host credentials.")
+            return redirect(url_for('host_login'))
+
+    if 'host' in session:
+        return redirect(url_for('host_dashboard'))
+
     return render_template('host_login.html')
 
 @app.route('/host-dashboard', methods=['GET', 'POST'])
 def host_dashboard():
-    if not session.get('host'):
-        flash("Please login as host.")
+    if 'host' not in session:
+        flash("Please login as host first.")
         return redirect(url_for('host_login'))
 
-    with get_db_connection() as conn:
+    job_description = ''
+    ranked_resumes = []
+
+    with closing(get_db_connection()) as conn:
         resumes = conn.execute('SELECT * FROM resumes ORDER BY uploaded_at DESC').fetchall()
 
-    ranked = [(r, 0.0) for r in resumes]
     if request.method == 'POST':
-        job_desc = request.form.get('job_description', '').strip()
-        if job_desc and resumes:
-            model = SentenceTransformer("all-MiniLM-L6-v2")
-            job_emb = model.encode(job_desc, convert_to_tensor=True)
-            texts = [open(r['filepath'], 'r', encoding='utf-8', errors='ignore').read() for r in resumes]
-            embs = model.encode(texts, convert_to_tensor=True)
-            scores = util.cos_sim(job_emb, embs)[0].tolist()
-            ranked = sorted(zip(resumes, scores), key=lambda x: x[1], reverse=True)
-            del job_emb, embs, scores
-            gc.collect()
+        job_description = request.form.get('job_description', '').strip()
+        if job_description and resumes:
+            model = get_model()
+            job_emb = model.encode(job_description, convert_to_tensor=True)
 
-    return render_template('host_dashboard.html', resumes=ranked, job_description=request.form.get('job_description', ''))
+            resume_texts = []
+            for r in resumes:
+                try:
+                    with open(r['filepath'], 'r', encoding='utf-8', errors='ignore') as f:
+                        resume_texts.append(f.read())
+                except Exception as e:
+                    app.logger.error(f"Failed to read resume {r['filepath']}: {e}")
+                    resume_texts.append('')
+
+            from sentence_transformers import util
+            resume_embs = model.encode(resume_texts, convert_to_tensor=True)
+            scores = util.cos_sim(job_emb, resume_embs)[0].tolist()
+            ranked_resumes = sorted(zip(resumes, scores), key=lambda x: x[1], reverse=True)
+        else:
+            flash("Please enter a job description and ensure resumes exist.")
+    else:
+        ranked_resumes = [(r, 0) for r in resumes]
+
+    return render_template('host_dashboard.html', resumes=ranked_resumes, job_description=job_description)
 
 @app.route('/download-ranked-resumes-csv', methods=['POST'])
-def download_csv():
-    if not session.get('host'):
+def download_ranked_resumes_csv():
+    if 'host' not in session:
+        flash("Please login as host first.")
         return redirect(url_for('host_login'))
-    job_desc = request.form.get('job_description', '').strip()
-    with get_db_connection() as conn:
+
+    job_description = request.form.get('job_description', '').strip()
+    with closing(get_db_connection()) as conn:
         resumes = conn.execute('SELECT * FROM resumes ORDER BY uploaded_at DESC').fetchall()
-    if job_desc and resumes:
-        model = SentenceTransformer("all-MiniLM-L6-v2")
-        job_emb = model.encode(job_desc, convert_to_tensor=True)
-        texts = [open(r['filepath'], 'r', encoding='utf-8', errors='ignore').read() for r in resumes]
-        embs = model.encode(texts, convert_to_tensor=True)
-        scores = util.cos_sim(job_emb, embs)[0].tolist()
-        ranked = sorted(zip(resumes, scores), key=lambda x: x[1], reverse=True)
-        del job_emb, embs, scores
-        gc.collect()
-    else:
-        ranked = [(r, 0.0) for r in resumes]
+
+    if not job_description or not resumes:
+        flash("Please enter a job description and ensure resumes exist.")
+        return redirect(url_for('host_dashboard'))
+
+    model = get_model()
+    job_emb = model.encode(job_description, convert_to_tensor=True)
+    resume_texts = []
+    for r in resumes:
+        try:
+            with open(r['filepath'], 'r', encoding='utf-8', errors='ignore') as f:
+                resume_texts.append(f.read())
+        except Exception as e:
+            app.logger.error(f"Failed to read resume {r['filepath']}: {e}")
+            resume_texts.append('')
+
+    from sentence_transformers import util
+    resume_embs = model.encode(resume_texts, convert_to_tensor=True)
+    scores = util.cos_sim(job_emb, resume_embs)[0].tolist()
+    ranked_resumes = sorted(zip(resumes, scores), key=lambda x: x[1], reverse=True)
 
     si = StringIO()
     writer = csv.writer(si)
-    writer.writerow(['Rank', 'Name', 'Filename', 'Uploaded At', 'Similarity'])
-    for idx, (r, s) in enumerate(ranked, 1):
-        writer.writerow([idx, r['user_name'] or 'Unknown', r['filename'], r['uploaded_at'], f"{s:.4f}"])
-    return Response(si.getvalue(), mimetype='text/csv', headers={"Content-Disposition":"attachment;filename=ranked.csv"})
+    writer.writerow(['Rank', 'Name', 'Filename', 'Uploaded At', 'Similarity Score'])
+    for idx, (r, score) in enumerate(ranked_resumes, 1):
+        writer.writerow([
+            idx, r['user_name'] or 'Unknown', r['filename'],
+            r['uploaded_at'], f"{score:.4f}"
+        ])
+
+    return Response(
+        si.getvalue(),
+        mimetype='text/csv',
+        headers={"Content-Disposition": "attachment;filename=ranked_resumes.csv"}
+    )
 
 @app.route('/uploads/<filename>')
-def serve_file(filename):
-    if 'user' not in session and not session.get('host'):
+def uploaded_file(filename):
+    if 'user' not in session and 'host' not in session:
         return "Unauthorized", 401
     return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
 
 @app.route('/logout')
 def logout():
     session.clear()
+    flash("Logged out successfully.")
     return redirect(url_for('login'))
 
+@app.route('/host-logout')
+def host_logout():
+    session.clear()
+    flash("Host logged out successfully.")
+    return redirect(url_for('host_login'))
+
 @app.route('/health')
-def health():
+def health_check():
     return "OK", 200
 
+# ---------------------- APP STARTUP --------------------------
 if __name__ == '__main__':
     os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-    port = int(os.getenv("PORT", 5000))
+    with closing(get_db_connection()) as conn:
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS resumes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_uid TEXT NOT NULL,
+                user_name TEXT,
+                filename TEXT NOT NULL,
+                filepath TEXT NOT NULL,
+                uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        conn.commit()
+
+    port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
