@@ -11,6 +11,7 @@ from werkzeug.utils import secure_filename
 import firebase_admin
 from firebase_admin import credentials, auth
 from dotenv import load_dotenv
+from sentence_transformers import SentenceTransformer, util
 from contextlib import closing
 import tempfile
 
@@ -19,34 +20,28 @@ load_dotenv()
 
 app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "supersecretkey")
-app.config['UPLOAD_FOLDER'] = 'uploads'
+app.config['UPLOAD_FOLDER'] = os.path.join(tempfile.gettempdir(), "uploads")
 
-# Firebase credential setup
-FIREBASE_CREDENTIAL_PATH = os.getenv("FIREBASE_CREDENTIAL_PATH")
+# Firebase config
 RENDER_SECRET_PATH = "/var/render/secrets/firebase_config.json"
 LOCAL_FALLBACK_PATH = "firebase_config.json"
 
-if FIREBASE_CREDENTIAL_PATH and os.path.exists(FIREBASE_CREDENTIAL_PATH):
-    cred_path = FIREBASE_CREDENTIAL_PATH
-elif os.path.exists(RENDER_SECRET_PATH):
-    cred_path = RENDER_SECRET_PATH
-elif os.path.exists(LOCAL_FALLBACK_PATH):
-    cred_path = LOCAL_FALLBACK_PATH
-else:
-    raise FileNotFoundError("Firebase config file not found.")
+cred_path = os.getenv("FIREBASE_CREDENTIAL_PATH") or (
+    RENDER_SECRET_PATH if os.path.exists(RENDER_SECRET_PATH) else LOCAL_FALLBACK_PATH
+)
+if not os.path.exists(cred_path):
+    raise FileNotFoundError("Firebase config file not found at expected paths.")
 
 cred = credentials.Certificate(cred_path)
 firebase_admin.initialize_app(cred)
 
-# SQLite DB path (uses /tmp for Render compatibility)
-DATABASE = os.getenv("SQLITE_DB_PATH") or os.path.join(tempfile.gettempdir(), "resumes.db")
+# Database
+DATABASE = os.path.join(tempfile.gettempdir(), "resumes.db")
 HOST_EMAIL = os.getenv("HOST_EMAIL", "host@example.com")
 HOST_PASSWORD = os.getenv("HOST_PASSWORD", "hostpass123")
 
-# NLP model (lazy loaded to save memory)
-def get_model():
-    from sentence_transformers import SentenceTransformer
-    return SentenceTransformer('paraphrase-MiniLM-L3-v2')  # Light model
+# Load SentenceTransformer once
+model = SentenceTransformer("all-MiniLM-L6-v2")
 
 def get_db_connection():
     conn = sqlite3.connect(DATABASE)
@@ -55,8 +50,7 @@ def get_db_connection():
 
 def verify_token(token):
     try:
-        decoded_token = auth.verify_id_token(token)
-        return decoded_token
+        return auth.verify_id_token(token)
     except Exception as e:
         app.logger.warning(f"Token verification failed: {e}")
         return None
@@ -124,24 +118,17 @@ def host_login():
     if request.method == 'POST':
         email = request.form.get('email')
         password = request.form.get('password')
-
         if email == HOST_EMAIL and password == HOST_PASSWORD:
             session['host'] = email
-            flash("Host login successful.")
             return redirect(url_for('host_dashboard'))
         else:
             flash("Invalid host credentials.")
-            return redirect(url_for('host_login'))
-
-    if 'host' in session:
-        return redirect(url_for('host_dashboard'))
-
     return render_template('host_login.html')
 
 @app.route('/host-dashboard', methods=['GET', 'POST'])
 def host_dashboard():
     if 'host' not in session:
-        flash("Please login as host first.")
+        flash("Please login as host.")
         return redirect(url_for('host_login'))
 
     job_description = ''
@@ -153,24 +140,20 @@ def host_dashboard():
     if request.method == 'POST':
         job_description = request.form.get('job_description', '').strip()
         if job_description and resumes:
-            model = get_model()
             job_emb = model.encode(job_description, convert_to_tensor=True)
-
             resume_texts = []
             for r in resumes:
                 try:
                     with open(r['filepath'], 'r', encoding='utf-8', errors='ignore') as f:
                         resume_texts.append(f.read())
-                except Exception as e:
-                    app.logger.error(f"Failed to read resume {r['filepath']}: {e}")
+                except:
                     resume_texts.append('')
 
             resume_embs = model.encode(resume_texts, convert_to_tensor=True)
-            from sentence_transformers import util
             cosine_scores = util.cos_sim(job_emb, resume_embs)[0].tolist()
             ranked_resumes = sorted(zip(resumes, cosine_scores), key=lambda x: x[1], reverse=True)
         else:
-            flash("Please enter a job description and ensure resumes exist.")
+            flash("Enter job description and ensure resumes exist.")
     else:
         ranked_resumes = [(r, 0) for r in resumes]
 
@@ -179,7 +162,7 @@ def host_dashboard():
 @app.route('/download-ranked-resumes-csv', methods=['POST'])
 def download_ranked_resumes_csv():
     if 'host' not in session:
-        flash("Please login as host first.")
+        flash("Login as host first.")
         return redirect(url_for('host_login'))
 
     job_description = request.form.get('job_description', '').strip()
@@ -188,23 +171,19 @@ def download_ranked_resumes_csv():
         resumes = conn.execute('SELECT * FROM resumes ORDER BY uploaded_at DESC').fetchall()
 
     if not job_description or not resumes:
-        flash("Please enter a job description and ensure resumes exist.")
+        flash("Enter job description and ensure resumes exist.")
         return redirect(url_for('host_dashboard'))
 
-    model = get_model()
     job_emb = model.encode(job_description, convert_to_tensor=True)
-
     resume_texts = []
     for r in resumes:
         try:
             with open(r['filepath'], 'r', encoding='utf-8', errors='ignore') as f:
                 resume_texts.append(f.read())
-        except Exception as e:
-            app.logger.error(f"Failed to read resume {r['filepath']}: {e}")
+        except:
             resume_texts.append('')
 
     resume_embs = model.encode(resume_texts, convert_to_tensor=True)
-    from sentence_transformers import util
     cosine_scores = util.cos_sim(job_emb, resume_embs)[0].tolist()
     ranked_resumes = sorted(zip(resumes, cosine_scores), key=lambda x: x[1], reverse=True)
 
@@ -221,11 +200,8 @@ def download_ranked_resumes_csv():
             f"{score:.4f}"
         ])
 
-    output = si.getvalue()
-    si.close()
-
     return Response(
-        output,
+        si.getvalue(),
         mimetype="text/csv",
         headers={"Content-Disposition": "attachment;filename=ranked_resumes.csv"}
     )
@@ -233,13 +209,11 @@ def download_ranked_resumes_csv():
 @app.route('/logout')
 def logout():
     session.clear()
-    flash("Logged out successfully.")
     return redirect(url_for('login'))
 
 @app.route('/host-logout')
 def host_logout():
     session.clear()
-    flash("Host logged out successfully.")
     return redirect(url_for('host_login'))
 
 @app.route('/uploads/<filename>')
@@ -252,10 +226,9 @@ def uploaded_file(filename):
 def health_check():
     return "OK", 200
 
-# App initialization
+# Initialization
 if __name__ == '__main__':
     os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-
     with closing(get_db_connection()) as conn:
         conn.execute('''
             CREATE TABLE IF NOT EXISTS resumes (
