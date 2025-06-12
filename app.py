@@ -11,6 +11,7 @@ from werkzeug.utils import secure_filename
 import firebase_admin
 from firebase_admin import credentials, auth
 from dotenv import load_dotenv
+from sentence_transformers import SentenceTransformer, util
 from contextlib import closing
 import tempfile
 
@@ -39,20 +40,28 @@ DATABASE = os.path.join(tempfile.gettempdir(), "resumes.db")
 HOST_EMAIL = os.getenv("HOST_EMAIL", "host@example.com")
 HOST_PASSWORD = os.getenv("HOST_PASSWORD", "hostpass123")
 
-# Lazy model loading to reduce memory
-model = None
-
-def load_model():
-    global model
-    if model is None:
-        from sentence_transformers import SentenceTransformer
-        model = SentenceTransformer("paraphrase-MiniLM-L3-v2")  # Lower memory model
-    return model
+# Load SentenceTransformer once
+model = SentenceTransformer("all-MiniLM-L6-v2")
 
 def get_db_connection():
     conn = sqlite3.connect(DATABASE)
     conn.row_factory = sqlite3.Row
     return conn
+
+# ✅ Ensure uploads folder and DB table exist even on Render
+os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+with closing(get_db_connection()) as conn:
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS resumes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_uid TEXT NOT NULL,
+            user_name TEXT,
+            filename TEXT NOT NULL,
+            filepath TEXT NOT NULL,
+            uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    conn.commit()
 
 def verify_token(token):
     try:
@@ -146,7 +155,6 @@ def host_dashboard():
     if request.method == 'POST':
         job_description = request.form.get('job_description', '').strip()
         if job_description and resumes:
-            model = load_model()
             job_emb = model.encode(job_description, convert_to_tensor=True)
             resume_texts = []
             for r in resumes:
@@ -157,7 +165,6 @@ def host_dashboard():
                     resume_texts.append('')
 
             resume_embs = model.encode(resume_texts, convert_to_tensor=True)
-            from sentence_transformers import util
             cosine_scores = util.cos_sim(job_emb, resume_embs)[0].tolist()
             ranked_resumes = sorted(zip(resumes, cosine_scores), key=lambda x: x[1], reverse=True)
         else:
@@ -182,7 +189,6 @@ def download_ranked_resumes_csv():
         flash("Enter job description and ensure resumes exist.")
         return redirect(url_for('host_dashboard'))
 
-    model = load_model()
     job_emb = model.encode(job_description, convert_to_tensor=True)
     resume_texts = []
     for r in resumes:
@@ -193,7 +199,6 @@ def download_ranked_resumes_csv():
             resume_texts.append('')
 
     resume_embs = model.encode(resume_texts, convert_to_tensor=True)
-    from sentence_transformers import util
     cosine_scores = util.cos_sim(job_emb, resume_embs)[0].tolist()
     ranked_resumes = sorted(zip(resumes, cosine_scores), key=lambda x: x[1], reverse=True)
 
@@ -236,21 +241,7 @@ def uploaded_file(filename):
 def health_check():
     return "OK", 200
 
-# Initialization
+# Production-ready entry point for gunicorn
 if __name__ == '__main__':
-    os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-    with closing(get_db_connection()) as conn:
-        conn.execute('''
-            CREATE TABLE IF NOT EXISTS resumes (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_uid TEXT NOT NULL,
-                user_name TEXT,
-                filename TEXT NOT NULL,
-                filepath TEXT NOT NULL,
-                uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        conn.commit()
-
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
