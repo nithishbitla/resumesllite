@@ -2,65 +2,76 @@ import os
 import sqlite3
 import time
 import csv
-import tempfile
 from io import StringIO
 from flask import (
-    Flask, request, render_template, redirect, url_for, jsonify,
-    flash, session, send_from_directory, Response
+    Flask, request, render_template, redirect, url_for, jsonify, flash,
+    session, send_from_directory, Response
 )
 from werkzeug.utils import secure_filename
-from firebase_admin import credentials, auth
 import firebase_admin
+from firebase_admin import credentials, auth
 from dotenv import load_dotenv
+from sentence_transformers import SentenceTransformer, util
 from contextlib import closing
 
-# ---------------------- ENV & APP SETUP ----------------------
+# Load environment variables from .env
 load_dotenv()
+
 app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "supersecretkey")
-app.config['UPLOAD_FOLDER'] = os.path.join(tempfile.gettempdir(), "uploads")
+app.config['UPLOAD_FOLDER'] = 'uploads'
 
-# ---------------------- FIREBASE SETUP -----------------------
+# Determine Firebase credential path for Render and local
 FIREBASE_CREDENTIAL_PATH = os.getenv("FIREBASE_CREDENTIAL_PATH")
 RENDER_SECRET_PATH = "/var/render/secrets/firebase_config.json"
 LOCAL_FALLBACK_PATH = "firebase_config.json"
 
+# Try environment variable first
 if FIREBASE_CREDENTIAL_PATH and os.path.exists(FIREBASE_CREDENTIAL_PATH):
     cred_path = FIREBASE_CREDENTIAL_PATH
+# Then try Render secret path
 elif os.path.exists(RENDER_SECRET_PATH):
     cred_path = RENDER_SECRET_PATH
+# Then fallback to local file in project folder
 elif os.path.exists(LOCAL_FALLBACK_PATH):
     cred_path = LOCAL_FALLBACK_PATH
 else:
-    raise FileNotFoundError("Firebase config file not found.")
+    raise FileNotFoundError(
+        "Firebase config file not found. Make sure one of the following exists:\n"
+        f"1) Environment variable FIREBASE_CREDENTIAL_PATH pointing to a valid file\n"
+        f"2) Render secret file mounted at {RENDER_SECRET_PATH}\n"
+        f"3) Local file named '{LOCAL_FALLBACK_PATH}' in project root"
+    )
 
 cred = credentials.Certificate(cred_path)
 firebase_admin.initialize_app(cred)
 
-# ---------------------- DATABASE SETUP -----------------------
-DATABASE = os.getenv("SQLITE_DB_PATH") or os.path.join(tempfile.gettempdir(), "resumes.db")
+# Constants
+DATABASE = os.getenv("SQLITE_DB_PATH", "resumes.db")
 HOST_EMAIL = os.getenv("HOST_EMAIL", "host@example.com")
 HOST_PASSWORD = os.getenv("HOST_PASSWORD", "hostpass123")
+
+# Ensure DB directory exists
+db_dir = os.path.dirname(DATABASE)
+if db_dir and not os.path.exists(db_dir):
+    os.makedirs(db_dir, exist_ok=True)
+
+# Load NLP model once
+model = SentenceTransformer('all-MiniLM-L6-v2')
 
 def get_db_connection():
     conn = sqlite3.connect(DATABASE)
     conn.row_factory = sqlite3.Row
     return conn
 
-# ---------------------- MODEL SETUP --------------------------
-def get_model():
-    from sentence_transformers import SentenceTransformer
-    return SentenceTransformer("paraphrase-MiniLM-L3-v2")  # light-weight
-
-# ---------------------- AUTH TOKEN ---------------------------
 def verify_token(token):
     try:
-        return auth.verify_id_token(token)
+        decoded_token = auth.verify_id_token(token)
+        return decoded_token
     except Exception as e:
         app.logger.warning(f"Token verification failed: {e}")
         return None
 
-# ---------------------- ROUTES -------------------------------
 @app.route('/')
 def login():
     if 'user' in session:
@@ -145,7 +156,7 @@ def host_dashboard():
         return redirect(url_for('host_login'))
 
     job_description = ''
-    ranked_resumes = []
+    ranked_resumes = None
 
     with closing(get_db_connection()) as conn:
         resumes = conn.execute('SELECT * FROM resumes ORDER BY uploaded_at DESC').fetchall()
@@ -153,7 +164,6 @@ def host_dashboard():
     if request.method == 'POST':
         job_description = request.form.get('job_description', '').strip()
         if job_description and resumes:
-            model = get_model()
             job_emb = model.encode(job_description, convert_to_tensor=True)
 
             resume_texts = []
@@ -165,10 +175,9 @@ def host_dashboard():
                     app.logger.error(f"Failed to read resume {r['filepath']}: {e}")
                     resume_texts.append('')
 
-            from sentence_transformers import util
             resume_embs = model.encode(resume_texts, convert_to_tensor=True)
-            scores = util.cos_sim(job_emb, resume_embs)[0].tolist()
-            ranked_resumes = sorted(zip(resumes, scores), key=lambda x: x[1], reverse=True)
+            cosine_scores = util.cos_sim(job_emb, resume_embs)[0].tolist()
+            ranked_resumes = sorted(zip(resumes, cosine_scores), key=lambda x: x[1], reverse=True)
         else:
             flash("Please enter a job description and ensure resumes exist.")
     else:
@@ -183,6 +192,7 @@ def download_ranked_resumes_csv():
         return redirect(url_for('host_login'))
 
     job_description = request.form.get('job_description', '').strip()
+
     with closing(get_db_connection()) as conn:
         resumes = conn.execute('SELECT * FROM resumes ORDER BY uploaded_at DESC').fetchall()
 
@@ -190,8 +200,8 @@ def download_ranked_resumes_csv():
         flash("Please enter a job description and ensure resumes exist.")
         return redirect(url_for('host_dashboard'))
 
-    model = get_model()
     job_emb = model.encode(job_description, convert_to_tensor=True)
+
     resume_texts = []
     for r in resumes:
         try:
@@ -201,31 +211,31 @@ def download_ranked_resumes_csv():
             app.logger.error(f"Failed to read resume {r['filepath']}: {e}")
             resume_texts.append('')
 
-    from sentence_transformers import util
     resume_embs = model.encode(resume_texts, convert_to_tensor=True)
-    scores = util.cos_sim(job_emb, resume_embs)[0].tolist()
-    ranked_resumes = sorted(zip(resumes, scores), key=lambda x: x[1], reverse=True)
+    cosine_scores = util.cos_sim(job_emb, resume_embs)[0].tolist()
+    ranked_resumes = sorted(zip(resumes, cosine_scores), key=lambda x: x[1], reverse=True)
 
     si = StringIO()
     writer = csv.writer(si)
     writer.writerow(['Rank', 'Name', 'Filename', 'Uploaded At', 'Similarity Score'])
-    for idx, (r, score) in enumerate(ranked_resumes, 1):
+
+    for idx, (resume, score) in enumerate(ranked_resumes, start=1):
         writer.writerow([
-            idx, r['user_name'] or 'Unknown', r['filename'],
-            r['uploaded_at'], f"{score:.4f}"
+            idx,
+            resume['user_name'] or 'Unknown',
+            resume['filename'],
+            resume['uploaded_at'],
+            f"{score:.4f}"
         ])
 
+    output = si.getvalue()
+    si.close()
+
     return Response(
-        si.getvalue(),
-        mimetype='text/csv',
+        output,
+        mimetype="text/csv",
         headers={"Content-Disposition": "attachment;filename=ranked_resumes.csv"}
     )
-
-@app.route('/uploads/<filename>')
-def uploaded_file(filename):
-    if 'user' not in session and 'host' not in session:
-        return "Unauthorized", 401
-    return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
 
 @app.route('/logout')
 def logout():
@@ -239,13 +249,22 @@ def host_logout():
     flash("Host logged out successfully.")
     return redirect(url_for('host_login'))
 
+@app.route('/uploads/<filename>')
+def uploaded_file(filename):
+    if 'host' not in session and 'user' not in session:
+        return "Unauthorized", 401
+    return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
+
 @app.route('/health')
 def health_check():
     return "OK", 200
 
-# ---------------------- APP STARTUP --------------------------
+# App initialization
 if __name__ == '__main__':
     os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+    if db_dir and not os.path.exists(db_dir):
+        os.makedirs(db_dir, exist_ok=True)
+
     with closing(get_db_connection()) as conn:
         conn.execute('''
             CREATE TABLE IF NOT EXISTS resumes (
@@ -259,5 +278,4 @@ if __name__ == '__main__':
         ''')
         conn.commit()
 
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=5000)
