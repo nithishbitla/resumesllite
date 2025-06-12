@@ -11,17 +11,17 @@ from werkzeug.utils import secure_filename
 import firebase_admin
 from firebase_admin import credentials, auth
 from dotenv import load_dotenv
-from sentence_transformers import SentenceTransformer, util
 from contextlib import closing
+import tempfile
 
-# Load environment variables from .env
+# Load environment variables
 load_dotenv()
 
 app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "supersecretkey")
 app.config['UPLOAD_FOLDER'] = 'uploads'
 
-# Firebase credential path selection
+# Firebase credential setup
 FIREBASE_CREDENTIAL_PATH = os.getenv("FIREBASE_CREDENTIAL_PATH")
 RENDER_SECRET_PATH = "/var/render/secrets/firebase_config.json"
 LOCAL_FALLBACK_PATH = "firebase_config.json"
@@ -33,23 +33,20 @@ elif os.path.exists(RENDER_SECRET_PATH):
 elif os.path.exists(LOCAL_FALLBACK_PATH):
     cred_path = LOCAL_FALLBACK_PATH
 else:
-    raise FileNotFoundError(
-        "Firebase config file not found. Make sure one of the following exists:\n"
-        f"1) FIREBASE_CREDENTIAL_PATH env variable\n"
-        f"2) Render secret at {RENDER_SECRET_PATH}\n"
-        f"3) Local file named '{LOCAL_FALLBACK_PATH}'"
-    )
+    raise FileNotFoundError("Firebase config file not found.")
 
 cred = credentials.Certificate(cred_path)
 firebase_admin.initialize_app(cred)
 
-# Constants
-DATABASE = "/tmp/resumes.db"  # Render-safe
+# SQLite DB path (uses /tmp for Render compatibility)
+DATABASE = os.getenv("SQLITE_DB_PATH") or os.path.join(tempfile.gettempdir(), "resumes.db")
 HOST_EMAIL = os.getenv("HOST_EMAIL", "host@example.com")
 HOST_PASSWORD = os.getenv("HOST_PASSWORD", "hostpass123")
 
-# Load NLP model
-model = SentenceTransformer('all-MiniLM-L6-v2')
+# NLP model (lazy loaded to save memory)
+def get_model():
+    from sentence_transformers import SentenceTransformer
+    return SentenceTransformer('paraphrase-MiniLM-L3-v2')  # Light model
 
 def get_db_connection():
     conn = sqlite3.connect(DATABASE)
@@ -156,6 +153,7 @@ def host_dashboard():
     if request.method == 'POST':
         job_description = request.form.get('job_description', '').strip()
         if job_description and resumes:
+            model = get_model()
             job_emb = model.encode(job_description, convert_to_tensor=True)
 
             resume_texts = []
@@ -168,6 +166,7 @@ def host_dashboard():
                     resume_texts.append('')
 
             resume_embs = model.encode(resume_texts, convert_to_tensor=True)
+            from sentence_transformers import util
             cosine_scores = util.cos_sim(job_emb, resume_embs)[0].tolist()
             ranked_resumes = sorted(zip(resumes, cosine_scores), key=lambda x: x[1], reverse=True)
         else:
@@ -192,6 +191,7 @@ def download_ranked_resumes_csv():
         flash("Please enter a job description and ensure resumes exist.")
         return redirect(url_for('host_dashboard'))
 
+    model = get_model()
     job_emb = model.encode(job_description, convert_to_tensor=True)
 
     resume_texts = []
@@ -204,6 +204,7 @@ def download_ranked_resumes_csv():
             resume_texts.append('')
 
     resume_embs = model.encode(resume_texts, convert_to_tensor=True)
+    from sentence_transformers import util
     cosine_scores = util.cos_sim(job_emb, resume_embs)[0].tolist()
     ranked_resumes = sorted(zip(resumes, cosine_scores), key=lambda x: x[1], reverse=True)
 
@@ -251,7 +252,7 @@ def uploaded_file(filename):
 def health_check():
     return "OK", 200
 
-# App start
+# App initialization
 if __name__ == '__main__':
     os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
