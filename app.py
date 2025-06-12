@@ -11,7 +11,6 @@ from werkzeug.utils import secure_filename
 import firebase_admin
 from firebase_admin import credentials, auth
 from dotenv import load_dotenv
-from sentence_transformers import SentenceTransformer, util
 from contextlib import closing
 import tempfile
 
@@ -40,8 +39,15 @@ DATABASE = os.path.join(tempfile.gettempdir(), "resumes.db")
 HOST_EMAIL = os.getenv("HOST_EMAIL", "host@example.com")
 HOST_PASSWORD = os.getenv("HOST_PASSWORD", "hostpass123")
 
-# Load SentenceTransformer once
-model = SentenceTransformer("all-MiniLM-L6-v2")
+# Lazy model loading to reduce memory
+model = None
+
+def load_model():
+    global model
+    if model is None:
+        from sentence_transformers import SentenceTransformer
+        model = SentenceTransformer("paraphrase-MiniLM-L3-v2")  # Lower memory model
+    return model
 
 def get_db_connection():
     conn = sqlite3.connect(DATABASE)
@@ -140,6 +146,7 @@ def host_dashboard():
     if request.method == 'POST':
         job_description = request.form.get('job_description', '').strip()
         if job_description and resumes:
+            model = load_model()
             job_emb = model.encode(job_description, convert_to_tensor=True)
             resume_texts = []
             for r in resumes:
@@ -150,6 +157,7 @@ def host_dashboard():
                     resume_texts.append('')
 
             resume_embs = model.encode(resume_texts, convert_to_tensor=True)
+            from sentence_transformers import util
             cosine_scores = util.cos_sim(job_emb, resume_embs)[0].tolist()
             ranked_resumes = sorted(zip(resumes, cosine_scores), key=lambda x: x[1], reverse=True)
         else:
@@ -174,6 +182,7 @@ def download_ranked_resumes_csv():
         flash("Enter job description and ensure resumes exist.")
         return redirect(url_for('host_dashboard'))
 
+    model = load_model()
     job_emb = model.encode(job_description, convert_to_tensor=True)
     resume_texts = []
     for r in resumes:
@@ -184,6 +193,7 @@ def download_ranked_resumes_csv():
             resume_texts.append('')
 
     resume_embs = model.encode(resume_texts, convert_to_tensor=True)
+    from sentence_transformers import util
     cosine_scores = util.cos_sim(job_emb, resume_embs)[0].tolist()
     ranked_resumes = sorted(zip(resumes, cosine_scores), key=lambda x: x[1], reverse=True)
 
